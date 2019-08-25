@@ -1,0 +1,102 @@
+// --------------------------------------------------------------
+// 
+// 十一、Neo4j图数据分析（四）：社区检测算法(Community Detection)
+//
+// 
+
+// 1. 计算图中三角型的数量
+//    - 使用ALGO过程
+CALL algo.triangle.stream('Page','LINKS')
+YIELD nodeA,nodeB,nodeC
+RETURN algo.asNode(nodeA).name AS nodeA, algo.asNode(nodeB).name AS nodeB, algo.asNode(nodeC).name AS nodeC
+
+// 2. 计算图中每个节点参与的三角型的次数，以及聚类系数
+//    - 使用ALGO过程
+CALL algo.triangleCount.stream('Page', 'LINKS', {concurrency:4})
+YIELD nodeId, triangles, coefficient
+RETURN algo.asNode(nodeId).name AS name, triangles, coefficient
+ORDER BY coefficient DESC
+
+// 3. 计算图中强连通分量的数量
+//    - 使用ALGO过程
+CALL algo.scc.stream('Page','LINKS')
+YIELD nodeId, partition
+RETURN algo.asNode(nodeId).name, partition
+
+// 4.1 增加一个单向关系
+MATCH (n1:Page{name:'Links'}), (n2:Page{name:'Silo'})
+CREATE (n2) -[:LINKS]-> (n1)
+
+// 4.2 再次计算强连通性
+//    - 使用ALGO过程
+CALL algo.scc.stream('Page','LINKS')
+YIELD nodeId, partition
+RETURN algo.asNode(nodeId).name, partition
+
+// 5. 计算图中连通分量的数量
+//    - 使用ALGO过程
+//    - 关系上面没有权重
+CALL algo.unionFind.stream('Page','LINKS')
+YIELD nodeId, setId
+RETURN algo.asNode(nodeId).name, setId
+
+// 6. 计算图中连通分量的数量
+//    - 使用ALGO过程，结果写入节点属性
+//    - 关系上面没有权重
+//    - 并行操作
+CALL algo.unionFind.queue('Page','LINKS',{concurrency:2})
+
+// 7. 通过标签传播发现图中的社区
+//    - 使用ALGO过程
+CALL algo.labelPropagation.stream("城市", "公路连接|铁路连接", { iterations: 10 })
+YIELD nodeId, label
+RETURN *
+
+// 8. 通过标签传播发现图中的社区
+//    - 使用ALGO过程
+//    - 为节点分配新的社区标签
+CALL algo.labelPropagation.stream("城市", "公路连接|铁路连接", { iterations: 10 })
+YIELD nodeId, label
+WITH nodeId, label
+CALL apoc.cypher.doIt('MATCH (n) WHERE id(n) = ' + nodeId + ' SET n:Group_' + label, NULL) 
+YIELD value
+RETURN value
+
+// 9. 通过标签传播发现图中的社区
+//    - 使用ALGO过程
+//    - 使用种子标签
+CALL algo.labelPropagation.stream("Page", "LINKS", {
+	iterations: 10
+        , partitionProperty:'community'
+        , direction:'OUTGOING' })
+YIELD nodeId, label
+RETURN nodeId, label 
+ORDER BY label ASC, nodeId ASC
+
+// 10. 计算图的Louvain模块度，并返回最终结果
+//    - 使用ALGO过程
+CALL algo.louvain.stream('城市', '公路连接|铁路连接')
+YIELD nodeId, community
+RETURN algo.asNode(nodeId).name AS node, community
+ORDER BY community;
+
+// 11. 计算图的Louvain模块度，将最终和中间结果写入节点属性
+//    - 使用ALGO过程
+CALL algo.louvain('城市', '公路连接|铁路连接', {
+  write:true,
+  includeIntermediateCommunities: true,
+  intermediateCommunitiesWriteProperty: 'communities'
+})
+YIELD nodes, communityCount, iterations, loadMillis, computeMillis, writeMillis;
+
+// 12. 查询社区划分结果，并返回结果
+//    - 使用Cypher
+
+MATCH (n:城市)
+RETURN n.communities[-1] AS community, collect(n.name) AS libraries
+ORDER BY size(libraries) DESC
+
+
+
+
+

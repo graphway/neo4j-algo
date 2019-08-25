@@ -1,0 +1,106 @@
+// --------------------------------------------------------------
+// 
+// 十二、Neo4j图数据分析（四）：相似度算法(Similarity)
+//
+// 
+
+
+// 1. 计算页面节点的Jaccard相似度，并返回最终结果
+//    - 使用ALGO过程
+/     - 基于直接邻居
+MATCH (p1:Page {name: 'Site A'}) -[:LINKS]- (p01)
+WITH p1, collect(id(p01)) AS p1s
+MATCH (p2:Page) -[:LINKS]- (p02) WHERE p1 <> p2
+WITH p1, p1s, p2, collect(id(p02)) AS p2s
+RETURN p1.name AS from,
+       p2.name AS to,
+       algo.similarity.jaccard(p1s, p2s) AS similarity
+ORDER BY similarity DESC
+
+// 2.1 计算两个向量的Jaccard相似度
+//    - 使用ALGO过程
+RETURN algo.similarity.jaccard([1,2,3], [1,2,4,5]) AS similarity
+
+// 2.2 计算两个向量的重叠相似度
+//    - 使用ALGO过程
+RETURN algo.similarity.overlap([1,2,3], [1,2,4,5]) AS similarity
+
+// 3. 计算所有页面节点的Jaccard相似度，并返回最终结果
+//    - 使用ALGO过程
+/     - 基于直接邻居
+MATCH (p1:Page)-[:LINKS]-(p2)
+WITH {item:id(p1), categories: collect(id(p2))} as userData
+WITH collect(userData) as data
+CALL algo.similarity.jaccard.stream(data)
+    YIELD item1, item2, count1, count2, intersection, similarity
+RETURN algo.asNode(item1).name AS from, algo.asNode(item2).name AS to, intersection, similarity
+ORDER BY similarity DESC
+
+// 4.1 计算余弦相似度，并返回最终结果
+//    - 使用ALGO过程
+RETURN algo.similarity.cosine([1,2,1,5], [1,2,4,5]) AS similarity
+
+
+// 4.2 比较Jaccard相似度对相同向量的计算结果
+//    - 使用ALGO过程
+//    - 如果把[1,2,1,5]变成[1,2,3,5]结果又会怎样？
+RETURN algo.similarity.cosine([1,2,1,5], [1,2,4,5]) AS similarity
+
+
+// 5. 计算余弦相似度，参照#1
+//    - 使用ALGO过程
+//    - 错误提示向量维度不同，解决方法参见#7
+MATCH (p1:Page {name: 'Site A'}) -[:LINKS]- (p01)
+WITH p1, collect(id(p01)) AS p1s
+MATCH (p2:Page) -[:LINKS]- (p02) WHERE p1 <> p2
+WITH p1, p1s, p2, collect(id(p02)) AS p2s
+RETURN p1.name AS from,
+       p2.name AS to,
+       algo.similarity.cosine(p1s, p2s) AS similarity
+ORDER BY similarity DESC
+
+// 6. 计算欧几里德相似度，并返回最终结果
+//    - 使用ALGO过程
+//    - 与余弦相似度相比较
+RETURN algo.similarity.euclideanDistance([1,2,3,5], [1,2,3,5]) AS similarity
+
+// 7.1 根据节点的直接邻居，计算其连接度向量
+//    - 使用Cypher
+// i. 返回所有节点，并按照其id排序
+MATCH (p:Page) 
+WITH id(p) AS pid ORDER BY id(p) ASC
+// ii. 将所有节点放入一个列表，然后得到所有可能的配对
+WITH collect(pid) AS pids
+UNWIND pids AS p1
+UNWIND pids AS p2
+WITH p1,p2
+// iii. 计算每个节点的向量 [1,0,2,...]，向量的维度是节点总数, 项是关系总数
+MATCH (n1), (n2)
+WHERE id(n1) = p1 AND id(n2) = p2
+OPTIONAL MATCH (n1) -[l:LINKS]- (n2) 
+WITH n1,n2, sum(CASE WHEN n1 = n2 THEN 1 WHEN l IS NULL THEN 0 ELSE 1 END) AS f
+// iv. 保存向量到节点的embedding属性
+WITH n1, collect(f) AS embedding
+    SET n1.embedding = embedding
+RETURN n1.name, n1.embedding
+
+// 7.2 根据节点的连接度向量计算几何距离，并输出结果
+//    - 使用ALGO
+
+// 返回所有节点，并按照其id排序
+MATCH (p:Page) 
+WITH id(p) AS pid ORDER BY id(p) ASC
+// 将所有节点放入一个列表，然后得到所有可能的配对
+WITH collect(pid) AS pids
+UNWIND pids AS p1
+UNWIND pids AS p2
+WITH p1,p2 WHERE p1 < p2
+MATCH (n1),(n2)
+WHERE id(n1) = p1 AND id(n2) = p2
+RETURN n1.name
+       , n2.name
+       , algo.similarity.euclideanDistance(n1.embedding, n2.embedding) AS similarity
+ORDER BY similarity ASC
+
+
+

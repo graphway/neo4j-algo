@@ -1,0 +1,189 @@
+// --------------------------------------------------------------
+// 
+// 九、Neo4j图数据分析（二）：路径搜索算法(Path Finding)
+//
+// 
+
+// 1. 返回从北京出发的、沿着铁路、第一站到达的城市
+MATCH path = (n:`城市`{name:'北京'}) -[:铁路连接]-> () -[:铁路连接*1]-> () -[:铁路连接]-> ()
+WITH path 
+RETURN DISTINCT nodes(path)[3].name
+
+// 2. 返回从北京出发的、沿着铁路、经过2站后可以到达的城市
+MATCH path = (n:`城市`{name:'北京'}) -[:铁路连接*6]-> ()
+WITH path 
+RETURN DISTINCT nodes(path)[6].name
+
+// 3. 返回从北京出发的、沿着铁路可以到达的所有城市及路径
+// 遍历顺序显示为深度优先
+MATCH path = (n:`城市`{name:'北京'}) -[:铁路连接*]-> ()
+WITH nodes(path) AS nodes
+WITH filter(x IN nodes WHERE NOT x:铁路站点) AS cities
+RETURN DISTINCT extract(c1 IN cities | c1.name) AS route
+
+// 宽度优先遍历，使用APOC过程，返回中转和目的城市
+MATCH (n:城市{name:'北京'})
+CALL apoc.path.expandConfig(n
+      ,{maxLevel:-1
+        ,bfs:true
+        ,uniqueness:'RELATIONSHIP_GLOBAL'
+        ,labelFilter:'+城市|-公路站点'
+        ,relationshipFilter:'铁路连接>'}
+     ) YIELD path
+WITH filter(n IN nodes(path) WHERE NOT n:铁路站点) AS route
+RETURN DISTINCT extract(n IN route | n.name)
+
+// 4. 计算两个城市之间的最短路径：
+//   - 跳转次数最少
+//   - 使用Cypher
+MATCH (start:城市{name:'天津'}),(end:城市{name:'石家庄'})
+	,path = allShortestPaths((start) -[:公路连接*]- (end))
+WITH DISTINCT nodes(path) AS nodes
+RETURN extract(n IN nodes | n.name) AS route
+
+// 5. 计算两个城市之间的最短路径：
+//   - 跳转次数最少
+//   - 使用ALGO过程
+MATCH (start:城市{name:'天津'}),(end:城市{name:'石家庄'})
+CALL algo.shortestPath.stream(start, end, NULL, 
+	{relationshipQuery:'公路连接'
+         ,direction:'BOTH'
+     	}
+     )
+YIELD nodeId, cost
+WITH nodeId, cost
+RETURN algo.getNodeById(nodeId).name AS city
+
+// 6. 计算两个城市之间的最短路径：
+//   - 距离最短
+//   - 仅限公路
+//   - 使用ALGO过程
+MATCH (start:城市{name:'天津'}),(end:城市{name:'石家庄'})
+CALL algo.shortestPath.stream(start, end, 'distance', 
+	{relationshipQuery:'公路连接'
+         ,direction:'BOTH'
+     	}
+     )
+YIELD nodeId, cost
+WITH nodeId, cost
+RETURN algo.getNodeById(nodeId).name AS city, cost
+
+// 7. 计算两个城市之间的最短路径：
+//   - 成本最低
+//   - 不限连接类型
+//   - 使用ALGO过程
+MATCH (start:城市{name:'天津'}),(end:城市{name:'石家庄'})
+CALL algo.shortestPath.stream(start, end, 'cost', 
+	{ direction:'BOTH'
+     	}
+     )
+YIELD nodeId, cost
+WITH nodeId, cost
+RETURN algo.getNodeById(nodeId).name AS city, cost
+
+// 8. 计算两个城市之间的最短路径：
+//   - 成本最低
+//   - 不能使用公路G3
+//   - 使用Cypher得到子图投影(projection）
+//   - 使用ALGO过程
+MATCH (start:城市{name:'天津'}),(end:城市{name:'石家庄'})
+CALL algo.shortestPath.stream(start, end
+        ,'cost'
+        ,{nodeQuery: 'MATCH (n:城市) RETURN id(n) AS id'
+        , relationshipQuery:'MATCH (n:城市) -[r:公路连接]- (m) WHERE id(m) <> id (n) AND r.line <> \'G3\' RETURN id(n) AS source, id(m) AS target, r.cost AS weight ORDER BY id(n) ASC, id(m) ASC'
+        , direction:'BOTH'
+        , graph:'cypher'
+      }) YIELD nodeId, cost
+RETURN algo.getNodeById(nodeId).name as station,cost
+
+// 9. 计算从一个城市出发，到达所有其他城市的最短路径
+//   - 基于跳转次数
+//   - 使用Cypher
+MATCH (n:城市 {name:'北京'})
+MATCH (m:城市) WHERE id(m) <> id(n)
+MATCH path = shortestPath((n) -[*]- (m))
+WITH filter(x IN nodes(path) WHERE NOT x:铁路站点 AND NOT x:公路站点) AS cities
+RETURN DISTINCT extract(n IN cities | n.name) AS route
+
+
+// 10. 计算从一个城市出发，到达所有其他城市的最短路径
+//   - 基于成本
+//   - 使用ALGO
+MATCH (n:城市 {name:'北京'})
+CALL algo.shortestPath.deltaStepping.stream(n, 'cost',1.0)
+YIELD nodeId, distance
+WITH algo.getNodeById(nodeId) AS destination, distance AS cost
+WHERE NOT destination:公路站点 AND NOT destination:铁路站点
+RETURN destination.name, cost
+ORDER BY cost
+
+// 11. 计算全图中所有节点对之间的最短距离
+//   - 基于跳转次数
+//   - 使用ALGO
+CALL algo.allShortestPaths.stream(null) 
+YIELD sourceNodeId, targetNodeId, distance 
+WHERE sourceNodeId < targetNodeId 
+WITH algo.getNodeById(sourceNodeId) AS source
+       ,algo.getNodeById(targetNodeId) AS target
+       ,distance 
+WHERE NOT (source:公路站点 OR source:铁路站点) AND NOT (target:公路站点 OR target:铁路站点) 
+RETURN source.name, target.name, distance
+ORDER BY distance DESC, source ASC, target ASC
+
+// 12. 计算全图中所有节点对之间的最短距离
+//   - 基于成本
+//   - 使用ALGO
+CALL algo.allShortestPaths.stream('cost') 
+YIELD sourceNodeId, targetNodeId, distance 
+WHERE sourceNodeId < targetNodeId 
+WITH algo.getNodeById(sourceNodeId) AS source
+       ,algo.getNodeById(targetNodeId) AS target
+       ,distance AS cost
+WHERE NOT (source:公路站点 OR source:铁路站点) AND NOT (target:公路站点 OR target:铁路站点) 
+RETURN source.name, target.name, cost
+ORDER BY cost DESC, source ASC, target ASC
+
+// 13. 计算从一个城市出发，到达另一个城市的K条最短路径
+//   - 基于距离
+//   - 使用ALGO
+MATCH (start:城市 {name:'北京'}),(end:城市{name:'上海'})
+CALL algo.kShortestPaths.stream(start, end, 3, 'distance') 
+YIELD index, nodeIds, costs
+// 创建一个大小和nodeIds相同的整数数组作为循环变量i
+WITH index, nodeIds, costs, range(0,size(nodeIds)-1) AS iterators
+UNWIND iterators AS i
+// 过滤nodeIds数组中有‘铁路站点’或‘公路站点’标签的节点
+WITH index, nodeIds[i] AS nid, costs[i+1] AS cost,
+     algo.getNodeById(nodeIds[i]) AS node
+WHERE NOT (node:公路站点 OR node:铁路站点)
+// 计算总成本
+WITH index, collect(node.name) AS route, sum(cost) AS totalCost
+RETURN index, route, totalCost
+ORDER BY index ASC
+
+// 14. 计算从一个城市出发到达最多其他城市的最小生成树
+//   - 基于距离
+//   - 创建新关系MSTALL，并以属性distance保存最短距离
+MATCH (n:城市 {name:"北京"}) 
+CALL algo.spanningTree.minimum("城市", "公路连接|铁路连接", "distance", id(n), 
+        {write:true, writeProperty:"MSTALL"}
+     )
+YIELD loadMillis, computeMillis, writeMillis, effectiveNodeCount 
+RETURN loadMillis, computeMillis, writeMillis, effectiveNodeCount
+
+// 15. 查看最小生成树，并过滤掉不相关的节点
+MATCH p=(a)-[r:MSTALL]->(b) 
+WHERE NOT (b:公路站点 AND size((b) -[:MSTALL]-> ()) = 0) 
+      AND NOT (b:铁路站点 AND size((b) -[:MSTALL]-> ()) = 0)
+RETURN a,r,b
+
+// 16. 计算从一个城市出发随机游走到达其他城市
+//   - 使用简单方式
+//   - 游走200步，返回节点的访问次数
+MATCH (source:城市 {name: "北京"}) 
+CALL algo.randomWalk.stream(id(source), 200, 1)
+YIELD nodeIds 
+UNWIND algo.getNodesById(nodeIds) AS place 
+RETURN place.name AS place,count(place) AS count
+ORDER BY count DESC
+

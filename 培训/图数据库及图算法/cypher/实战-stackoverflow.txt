@@ -1,0 +1,131 @@
+// --------------------------------------------------------------
+// 
+// 实战： Stackoverflow开放数据集分析
+//
+// 
+
+
+// 1. 使用Neo4j IMPORT命令行导入数据
+// 
+//    打开一个命令行窗口/终端窗口，进入Neo4j安装目录，运行下面的命令
+
+bin\neo4j-admin import --database=stackoverflow.graphdb --id-type=STRING --nodes:Post=".\import\stackoverflow\posts.csv" --nodes:User=".\import\stackoverflow\users.csv" --nodes:Tag=".\import\stackoverflow\tags.csv" --relationships:PARENT_OF=".\import\stackoverflow\posts_rel.csv" --relationships:ANSWER=".\import\stackoverflow\posts_answers.csv" --relationships:HAS_TAG=".\import\stackoverflow\tags_posts_rel.csv" --relationships:POSTED=".\import\stackoverflow\users_posts_rel.csv" --ignore-duplicate-nodes=true --ignore-missing-nodes=true
+
+// 2. 启动数据库、成功加载stakoverflow.graphdb后，运行下面的Cypher查询创建索引和限制。
+//    需要逐行复制并执行，不能批处理。
+
+CREATE INDEX ON :Post(title);
+CREATE INDEX ON :Post(createdAt);
+CREATE INDEX ON :Post(score);
+CREATE INDEX ON :Post(views);
+CREATE INDEX ON :Post(favorites);
+CREATE INDEX ON :Post(answers);
+CREATE INDEX ON :Post(score);
+CREATE INDEX ON :User(name);
+CREATE INDEX ON :User(createdAt);
+CREATE INDEX ON :User(reputation);
+CREATE INDEX ON :User(age);
+CREATE INDEX ON :Tag(count);
+
+CREATE CONSTRAINT ON (t:Tag) ASSERT t.tagId IS UNIQUE;
+CREATE CONSTRAINT ON (u:User) ASSERT u.userId IS UNIQUE;
+CREATE CONSTRAINT ON (p:Post) ASSERT p.postId IS UNIQUE;
+
+// 3. 统计标签和节点数
+
+MATCH (n:Post) WITH count(*) AS count RETURN 'Post' AS label, count
+UNION 
+MATCH (t:Tag) WITH count(*) AS count RETURN 'Tag' AS label, count
+UNION
+MATCH (u:User) WITH count(*) AS count RETURN 'User' AS label, count
+
+// 4. 显示数据库模型
+
+CALL apoc.meta.graph
+
+// 5. 统计用户发帖次数的分布
+
+// 统计单位：N x 100次
+MATCH (u:User)
+WITH round(size ((u) -- ()) / 100) AS countOfPosts
+WITH countOfPosts, count(countOfPosts) AS cnt
+RETURN countOfPosts, cnt
+ORDER BY countOfPosts ASC
+
+
+// 6.1 根据(Post) -- (Tag) 之间的关系发现Tag之间的相关度
+// 创建新关系：(Tag) –[:SIMILAR_TO]-> (Tag)
+//    - 关系的权重属性是Tag同时被Post引用的次数
+//    - 关系的含义是无向的，因此只创建一次
+//    - 使用apoc过程批量创建
+
+CALL apoc.periodic.iterate(
+    "MATCH (n:Tag) WHERE n.count > 100 RETURN id(n) AS tid ORDER BY id(n) ASC;",
+    "MATCH (t:Tag) WHERE id(t) = tid CALL apoc.path.expandConfig(t,{relationshipFilter:'HAS_TAG',labelFilter:'+Post|/Tag',uniqueness:'RELATIONSHIP_GLOBAL'}) YIELD path WITH t, nodes(path) AS nodes WITH t, nodes[2] AS node, count(*) AS cnt WHERE id(t) < id(node) AND node.count > 10 MERGE (t) -[r:SIMILAR_TO]-> (node) ON CREATE SET r.score = cnt",
+    {batchSize:10, parallel:false,iterateList:true}
+)
+
+// 6.2 统计创建的新关系数
+MATCH (t:Tag) -[r:SIMILAR_TO]-> () 
+RETURN count(r)
+
+// 7.1 验证：SILIMAR_TO关系不存在双向关系(2个节点之间的环)
+MATCH path = (t1:Tag) -[:SIMILAR_TO]-> (t2:Tag) -[:SIMILAR_TO]-> (t1)
+RETURN path
+
+// 7.2 查看score值最大的SIMILAR_TO关系上所连接的Tag节点
+
+MATCH path = (:Tag) -[r:SIMILAR_TO]-> () RETURN path ORDER BY r.score DESC LIMIT 10
+
+// 8.1 根据SIMILAR_TO关系，分析主题的连通性
+CALL algo.unionFind.queue('Tag','SIMILAR_TO',{concurrency:4, write:true, partitionProperty:'componentSimTo'});
+
+// 8.2 创建新索引
+CREATE INDEX ON :Tag(componentSimTo)
+
+// 9.1 使用标签传播对Tag节点进行分组，不带权重
+CALL algo.labelPropagation('Tag', 'SIMILAR_TO',
+  {iterations:10, writeProperty:'lpaPartitionOut', write:true, direction: 'OUTGOING'})
+YIELD nodes, iterations, loadMillis, computeMillis, writeMillis, write, writeProperty;
+
+// 9.2 使用标签传播对Tag节点进行分组，考虑关系的带权重
+CALL algo.labelPropagation('Tag', 'SIMILAR_TO',
+  {iterations:10, weightProperty:'score', writeProperty:'lpaPartitionOutWeighted', write:true, direction: 'OUTGOING'})
+YIELD nodes, iterations, loadMillis, computeMillis, writeMillis, write, writeProperty;
+
+
+// 10.2 使用度中心性过程计算Tag节点的重要性
+CALL algo.degree('Tag', 'SIMILAR_TO'
+     , {write: true, writeProperty:'degree',concurrency:4}
+     ) 
+YIELD nodes,loadMillis,computeMillis,writeMillis,write, writeProperty
+
+// 10.2 查看结果
+MATCH (t:Tag) 
+RETURN t.tagId, t.degree, count(t) AS cnt
+ORDER BY t.degree DESC LIMIT 10
+
+// 11.1 使用紧密中心性过程计算Tag节点的重要性
+
+CALL algo.closeness('Tag', 'SIMILAR_TO', {improved: true, writeProperty:'closeness',write:true})
+YIELD nodes,loadMillis,computeMillis,writeMillis
+
+// 11.2 查看结果
+MATCH (t:Tag) RETURN t.tagId, t.closeness, count(t) AS cnt
+ORDER BY t.closeness DESC LIMIT 10
+
+
+// 12.1 使用紧密中心性过程计算Tag节点的重要性
+CALL algo.pageRank('Tag', 'SIMILAR_TO’,
+    {iterations:20, dampingFactor:0.85, write: true,
+	writeProperty:"pagerank", weightProperty: "score"
+    })
+YIELD nodes, iterations, loadMillis, computeMillis, writeMillis, dampingFactor, write, writeProperty
+
+// 12.2 查看结果
+MATCH (t:Tag) RETURN t.tagId, t.pagerank, count(t) AS cnt
+ORDER BY t.pagerank DESC LIMIT 10
+
+
+
+

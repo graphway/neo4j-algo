@@ -1,0 +1,223 @@
+// =======================================================================================
+
+// 导入中国公路和铁路样例数据
+
+// 1 - 省会城市： cities.csv
+
+// 保存数据到import目录下
+
+// .1 测试读取文件
+LOAD CSV FROM 'file:///cities.csv' AS line
+WITH line LIMIT 3 
+RETURN line
+
+
+// .2 读取文件头
+
+LOAD CSV WITH HEADERS FROM 'file:///cities.csv' AS line
+WITH line LIMIT 3 
+RETURN line
+
+
+// .3 导入城市
+
+LOAD CSV WITH HEADERS FROM 'file:///cities.csv' AS line
+CREATE (c:城市{name: replace(line.city,"'",'')})
+    SET c.latitude = toFloat(line.latitude)
+         , c.longitude = toFloat(line.longitude)
+         , c.population=toFloat(line.population)
+RETURN count (c)
+
+
+// 导入铁路数据
+
+LOAD CSV WITH HEADERS FROM 'file:///rails.csv' AS line
+MERGE (c1:城市{name:line.from_city})
+MERGE (c2:城市{name:line.to_city})
+MERGE (c3:城市:铁路站点{name:line.from_city+'-'+line.to_city+'-'+line.line})
+MERGE (c4:城市:铁路站点{name:line.to_city+'-'+line.from_city+'-'+line.line})
+MERGE (c3) -[r1:铁路连接{line:line.line}]-> (c4)
+    SET r1.distance = toInteger(line.distance)
+        ,r1.cost = toFloat(line.cost)
+        ,r1.order = toInteger(line.order)
+MERGE (c1) -[r2:铁路连接{line:line.line}]-> (c3)
+    SET r2.distance = 0
+        ,r2.cost = 0
+        ,r2.order = toInteger(line.order)
+MERGE (c4) -[r3:铁路连接{line:line.line}]-> (c2)
+    SET r3.distance = 0
+        ,r3.cost = 0
+        ,r3.order = toInteger(line.order)	
+
+
+
+// 导入道路数据
+
+LOAD CSV WITH HEADERS FROM 'file:///roads.csv' AS line
+MERGE (c1:城市{name:line.from_city})
+MERGE (c2:城市{name:line.to_city})
+MERGE (c3:城市:公路站点{name:line.from_city+'-'+line.to_city+'-'+line.road})
+MERGE (c4:城市:公路站点{name:line.to_city+'-'+line.from_city+'-'+line.road})
+MERGE (c3) -[r1:公路连接{line:line.road}]-> (c4)
+    SET r1.distance = toInteger(line.distance)
+        ,r1.cost = toFloat(line.cost)
+        ,r1.order = toInteger(line.order)
+MERGE (c1) -[r2:公路连接{line:line.road}]-> (c3)
+    SET r2.distance = 0
+        ,r2.cost = 0
+        ,r2.order = toInteger(line.order)
+MERGE (c4) -[r3:公路连接{line:line.road}]-> (c2)
+    SET r3.distance = 0
+        ,r3.cost = 0
+        ,r3.order = toInteger(line.order)
+		
+
+
+// 计算图的连通分量
+CALL apoc.periodic.commit("MATCH (a:城市) WHERE a.component IS NULL WITH a LIMIT 1
+CALL apoc.path.subgraphNodes(a, {maxLevel:-1}) YIELD node
+WITH node,a
+SET node.component = id(a)
+RETURN count(node)",{limit:1000})
+
+
+// 查询连通分量
+
+MATCH (a:城市)
+WITH DISTINCT a.component AS component
+RETURN component
+
+// ####################################
+// 路径寻找
+// 
+
+// 返回从北京出发的、沿着铁路、第一站到达的城市
+MATCH path = (n:`城市`{name:'北京'}) <-[:位于]- () -[:铁路连接*1]-> () -[:位于]-> ()
+WITH path 
+RETURN DISTINCT nodes(path)[3].name
+
+// 返回从北京出发的、沿着铁路、经过2站后可以到达的城市
+MATCH path = (n:`城市`{name:'北京'}) -[:铁路连接*]-> () 
+WITH path 
+WHERE length(path) > 2
+RETURN DISTINCT nodes(path)[3].name
+
+
+// 返回从北京出发的、沿着铁路可以到达的所有城市及路径
+// 遍历顺序显示为深度优先
+MATCH path = (n:`城市`{name:'北京'}) <-[:位于]- () -[:铁路连接*]-> () -[:位于]-> ()
+WITH nodes(path) AS nodes
+RETURN extract(n IN nodes | n.name) AS route
+
+// 返回从北京出发的、沿着公路可以到达的所有城市及路径
+// 遍历顺序显示为深度优先
+MATCH (n:城市{name:'北京'})
+CALL apoc.path.expandConfig(n
+      ,{maxLevel:-1
+      ,bfs:true
+      ,uniqueness:'RELATIONSHIP_GLOBAL'
+      ,labelFilter:'+城市|公路站点|-铁路站点'
+      ,relationshipFilter:'位于|公路连接>'}) YIELD path
+RETURN path
+
+
+// 查询所有从北京出发的、到其他城市的最短公路连接路径
+// 因为shortestPath只计算跳转次数，不同的公路连接在这里没有区别，所以使用DISTINCT
+
+MATCH (n1:`城市`{name:'北京'}), (n2:`城市`)
+WHERE id(n1) <> id(n2)
+WITH n1, n2
+MATCH path = allShortestPaths((n1) -[:公路连接*]-> (n2))
+WITH DISTINCT nodes(path) AS nodes
+RETURN extract(n IN nodes | n.name) AS route
+
+// 查询所有从北京出发的、到其他城市的最短距离路径
+MATCH (n1:`城市`{name:'北京'}), (n2:`城市`)
+WHERE id(n1) <> id(n2)
+WITH n1, n2
+CALL algo.shortestPath.stream(n1,n2,'distance') YIELD nodeId, cost
+RETURN algo.getNodeById(nodeId).name AS place, cost
+
+// 宽度优先遍历，使用APOC过程
+MATCH (n:城市{name:'北京'})
+CALL apoc.path.expandConfig(n,{maxLevel:-1,bfs:true,relationshipFilter:'铁路连接>'}) YIELD path
+RETURN extract(n IN nodes(path) | n.name) AS route
+ 
+// 计算两个城市之间的最短路径：
+//   - 跳转次数最少
+//   - 使用Cypher
+MATCH (start:城市{name:'无锡'}),(end:城市{name:'合肥'})
+,path = allShortestPaths((start) -[:公路连接*]- (end))
+WITH DISTINCT nodes(path) AS nodes
+RETURN extract(n IN nodes | n.name) AS route
+
+// 计算两个城市之间的最短路径：
+//   - 跳转次数最少
+//   - 使用ALGO过程
+MATCH (start:城市{name:'无锡'}),(end:城市{name:'合肥'})
+CALL algo.shortestPath.stream(start, end, NULL, {relationshipQuery:'公路连接',direction:'BOTH'})
+YIELD nodeId, cost
+RETURN algo.getNodeById(nodeId).name AS place, cost
+
+
+// 计算两个城市之间的最短路径：
+//   - 成本最低
+//   - 设定公路的限定条件
+//   - 使用ALGO过程
+MATCH (start:城市{name:'北京'}),(end:城市{name:'徐州'})
+CALL algo.shortestPath.stream(start, end
+	  ,'cost'
+      ,{nodeQuery: 'MATCH (n:城市) RETURN id(n) AS id'
+        , relationshipQuery:'MATCH (n:城市) -[r:公路连接]- (m) WHERE id(m) <> id (n) AND r.line IN ["G1","G2"] RETURN id(n) AS source, id(m) AS target, r.cost AS weight ORDER BY id(n) ASC, id(m) ASC, r.cost DESC'
+        , direction:'BOTH'
+        , graph:'cypher'
+      }) YIELD nodeId, cost
+RETURN algo.getNodeById(nodeId).name as station,cost
+
+// 计算全图中所有节点对之间的最短距离
+//   - 基于跳转次数
+//   - 使用ALGO
+CALL algo.allShortestPaths.stream(null) 
+YIELD sourceNodeId, targetNodeId, distance 
+WHERE sourceNodeId < targetNodeId 
+RETURN algo.getNodeById(sourceNodeId).name AS source
+	   ,algo.getNodeById(targetNodeId).name AS target
+       ,distance 
+ORDER BY distance DESC, source ASC, target ASC
+
+// 计算全图中所有节点对之间的最短距离
+//   - 基于成本
+//   - 使用ALGO
+CALL algo.allShortestPaths.stream('cost') 
+YIELD sourceNodeId, targetNodeId, distance 
+WHERE sourceNodeId < targetNodeId 
+RETURN algo.getNodeById(sourceNodeId).name AS source
+	   ,algo.getNodeById(targetNodeId).name AS target
+       ,distance AS cost
+ORDER BY cost DESC, source ASC, target ASC
+
+// 计算从一个城市出发，到达另一个城市的K条最短路径
+//   - 基于距离
+//   - 使用ALGO
+MATCH (start:城市 {name:'北京'}),(end:城市{name:'上海'})
+CALL algo.kShortestPaths.stream(start, end, 5, 'distance') 
+YIELD index, nodeIds, costs, path
+RETURN index, [node in algo.getNodesById(nodeIds[1..-1]) | node.name] AS via
+	   , reduce(acc=0.0, cost in costs | acc + cost) AS totalDistance
+	   
+// 计算从一个城市出发的最小生成树
+//   - 基于距离
+//   - 使用ALGO
+MATCH (start:城市 {name:'北京'})
+CALL algo.spanningTree.minimum("城市", "铁路连接|公路连接", "distance", id(start)
+	  , {write:true, writeProperty:"MINST"})
+YIELD loadMillis, computeMillis, writeMillis, effectiveNodeCount
+RETURN loadMillis, computeMillis, writeMillis, effectiveNodeCount;
+
+	   
+
+
+
+
+
+

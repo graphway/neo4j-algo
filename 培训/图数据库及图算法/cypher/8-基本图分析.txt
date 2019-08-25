@@ -1,0 +1,81 @@
+// --------------------------------------------------------------
+// 
+// 八、Neo4j图数据分析（一）：基本图特征
+//
+// 
+
+// 统计某类节点数量
+MATCH (n:`城市`) RETURN count(n)
+
+// 统计边的数量
+MATCH (n:`城市`) RETURN size((n)--())
+
+// 寻找叶子节点 
+MATCH (n:`城市`)
+WHERE NOT ((n)-->()) RETURN n
+
+// 寻找根节点
+MATCH (n:`城市`)
+WHERE NOT (()-->(n)) RETURN n
+
+// 寻找度数最大的节点
+MATCH (a:城市)
+RETURN a, size((a) -- ()) AS degree
+ORDER BY degree DESC LIMIT 3
+
+// 计算图的直径
+MATCH (a:城市),(b:城市)
+WHERE id(b) > id(a)
+WITH a,b
+MATCH p = allShortestPaths((a) -[*..30]-> (b))
+RETURN length(p) AS length
+ORDER BY length DESC LIMIT 1
+
+// 统计节点的出度和入度
+MATCH (n:城市) 
+RETURN n.name, size((n) --> ()) AS outDegree, size((n) <-- ()) AS inDegree
+ORDER BY outDegree, inDegree
+
+// 查询从一个城市出发能够直接到达的城市
+MATCH (n1:城市{name:'北京'}) -[]-> () -[r]-> () -[]-> (n2)
+RETURN n1.name, type(r) AS type, r.line, n2.name, r.distance
+ORDER BY r.distance
+
+// 查询节点的所有属性
+MATCH (u:城市) RETURN keys(u) LIMIT 1
+
+// 测试属性的唯一性
+MATCH (u:城市) 
+RETURN count(DISTINCT u.name) AS DistinctName, count(u.name) AS TotalUser, 100*count(DISTINCT u.name)/count(u.name) AS Uniqueness;
+
+// 测试属性是否有空/NULL
+MATCH (u:城市) WHERE u.name IS null RETURN count(u);
+
+// 统计节点属性值的分布
+MATCH (n:城市) 
+RETURN min(n.population) AS minPopulation
+	 , max(n.population) AS maxPopulation
+     , avg(n.population) AS avgPopulation
+     , stDev(n.population) AS stdDevPopulation;
+	 
+// 数据库内容采样：10%采样比率
+MATCH (n) WHERE rand() <= 0.1
+RETURN
+DISTINCT labels(n),
+count(*) AS SampleSize,
+avg(size(keys(n))) as Avg_PropertyCount,
+min(size(keys(n))) as Min_PropertyCount,
+max(size(keys(n))) as Max_PropertyCount,
+avg(size( (n)-[]-() ) ) as Avg_RelationshipCount,
+min(size( (n)-[]-() ) ) as Min_RelationshipCount,
+max(size( (n)-[]-() ) ) as Max_RelationshipCount
+
+// 寻找三角形
+MATCH (a)-[]-(b)-[]-(c)-[]-(a)
+RETURN DISTINCT a, b, c
+
+// 寻找长度为6的环
+MATCH path = (a:城市)-[*6]-(a)
+RETURN DISTINCT path
+
+

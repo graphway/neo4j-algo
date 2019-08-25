@@ -1,0 +1,146 @@
+// --------------------------------------------------------------
+// 
+// 十、Neo4j图数据分析（三）：中心性算法(Centrality)
+//
+// 
+
+// 1. 计算全图中所有节点的度中心性
+//   - 包括所有关系、和两个方向
+//   - 同一对节点之间、一个方向上的关系只统计一次
+//   - 结果直接返回
+CALL algo.degree.stream('城市', NULL, {direction: 'BOTH'})
+YIELD nodeId, score
+RETURN algo.asNode(nodeId).name AS node, score AS centrality
+ORDER BY centrality DESC
+LIMIT 20;
+
+
+// 2. 计算全图中所有节点的度中心性
+//   - 包括所有关系、和两个方向
+//   - 计算权重：distance
+//   - 同一对节点之间、一个方向上的关系只统计一次
+//   - 结果直接返回
+CALL algo.degree.stream('城市', NULL, {direction: 'BOTH', weightProperty: 'distance'})
+YIELD nodeId, score
+RETURN algo.asNode(nodeId).name AS node, score AS centrality
+ORDER BY centrality DESC
+LIMIT 20;
+
+// 3. 计算全图中所有节点的紧密中心性
+CALL algo.closeness.stream('城市', NULL)
+YIELD nodeId, centrality
+RETURN algo.asNode(nodeId).name AS node, centrality
+ORDER BY centrality DESC LIMIT 20;
+
+// 4.1 计算全图中所有节点的紧密中心性，包括非连通图
+CALL algo.closeness.stream('城市', NULL, {improved: true})
+YIELD nodeId, centrality
+RETURN algo.asNode(nodeId).name AS node, centrality
+ORDER BY centrality DESC LIMIT 20;
+
+// 5. 计算包含某节点的连通子图
+//    - 使用APOC过程
+//    - 关系只遍历一次
+MATCH (n:城市{name:'北京'})
+CALL apoc.path.expandConfig(n, {maxLevel: -1
+        , relationshipFilter: '公路连接|铁路连接'
+        , labelFilter: '城市'
+        , uniqueness: 'RELATIONSHIP_GLOBAL'
+     }
+) YIELD path
+RETURN path
+
+// 6. 计算包含某节点的连通子图中所有节点的紧密中心性
+//    - 使用APOC过程搜索连通子图
+//    - 将#5中的查询作为参数之一
+//    - 使用Cypher投影将子图作为参数
+//    - 紧密中心性的结果被标准化
+CALL algo.closeness.stream(
+    'MATCH (n:城市{name:"北京"}) CALL apoc.path.expandConfig(n, {maxLevel: -1,relationshipFilter: "公路连接|铁路连接",labelFilter:"城市", uniqueness:"RELATIONSHIP_GLOBAL"}) YIELD path WITH nodes(path) AS nodes UNWIND nodes AS n RETURN DISTINCT id(n) AS id',
+    'MATCH (n:城市{name:"北京"}) CALL apoc.path.expandConfig(n, {maxLevel: -1,relationshipFilter: "公路连接|铁路连接",labelFilter:"城市", uniqueness:"RELATIONSHIP_GLOBAL"}) YIELD path WITH relationships(path) AS rels UNWIND rels AS rel RETURN DISTINCT id(startNode(rel)) AS source, id(endNode(rel)) AS target',
+    {graph:'cypher'}
+)
+YIELD nodeId, centrality 
+RETURN algo.asNode(nodeId).name AS node, centrality
+ORDER BY centrality DESC
+LIMIT 20;
+
+
+// 7. 计算节点的协调中心性
+
+CALL algo.closeness.harmonic.stream("城市", "公路连接|铁路连接") 
+YIELD nodeId, centrality 
+WITH algo.getNodeById(nodeId) AS node, centrality
+WHERE NOT (node:公路站点 OR node:铁路站点)
+RETURN node.name AS city, centrality 
+ORDER BY centrality DESC
+
+// 8. 计算全图中所有节点的间接中心性
+CALL algo.betweenness.stream('城市', '铁路连接|公路连接',{direction: 'BOTH'} )
+YIELD nodeId, centrality
+RETURN algo.asNode(nodeId).name AS node, centrality
+ORDER BY centrality DESC
+LIMIT 20;
+
+// 9. 创建一个新图
+MERGE (home:Page {name:'Home'})
+MERGE (about:Page {name:'About'})
+MERGE (product:Page {name:'Product'})
+MERGE (links:Page {name:'Links'})
+MERGE (a:Page {name:'Site A'})
+MERGE (b:Page {name:'Site B'})
+MERGE (c:Page {name:'Site C'})
+MERGE (d:Page {name:'Site D'})
+MERGE (home)-[:LINKS]->(about)
+MERGE (about)-[:LINKS]->(home)
+MERGE (product)-[:LINKS]->(home)
+MERGE (home)-[:LINKS]->(product)
+MERGE (links)-[:LINKS]->(home)
+MERGE (home)-[:LINKS]->(links)
+MERGE (links)-[:LINKS]->(a)
+MERGE (a)-[:LINKS]->(home)
+MERGE (links)-[:LINKS]->(b)
+MERGE (b)-[:LINKS]->(home)
+MERGE (links)-[:LINKS]->(c)
+MERGE (c)-[:LINKS]->(home)
+MERGE (links)-[:LINKS]->(d)
+MERGE (d)-[:LINKS]->(home)
+
+// 10. 计算节点的特征向量中心性
+//    - Page节点、LINKS关系
+//    - 规范化结果：使用最大值作为分母转换每个节点的值到(0,1]区间
+CALL algo.eigenvector.stream('Page', 'LINKS', {normalization: "max"})
+YIELD nodeId, score
+WITH algo.asNode(nodeId) AS node, score
+RETURN node.name, score
+ORDER BY score DESC
+
+// 11. 计算节点的特征向量中心性
+//    - 使用Cypher投影
+//    - 规范化结果：使用最大值作为分母转换每个节点的值到(0,1]区间
+CALL algo.eigenvector.stream(
+  'MATCH (p:Page) RETURN id(p) as id',
+  'MATCH (p1:Page)-[:LINKS]->(p2:Page) RETURN id(p1) as source, id(p2) as target',
+  {graph:'cypher', iteration:10, normalization: 'max' }
+) YIELD nodeId, score
+WITH algo.asNode(nodeId) AS node, score
+RETURN node.name, score
+ORDER BY score DESC
+
+// 12. 计算节点的页面排行指标
+//    - Page节点、LINKS关系
+CALL algo.pageRank.stream('Page', 'LINKS', {iterations:20, dampingFactor:0.85})
+YIELD nodeId, score
+WITH algo.asNode(nodeId) AS node, score
+RETURN node.name, score
+ORDER BY score DESC
+
+// 13. 计算节点的页面排行指标
+//    - Page节点、LINKS关系
+//    - 设置个性化节点
+MATCH (n:Page{name:'About'})
+CALL algo.pageRank.stream('Page', 'LINKS', {iterations:2, dampingFactor:0.85, sourceNodes:[n]})
+YIELD nodeId, score
+WITH algo.asNode(nodeId) AS node, score
+RETURN node.name, score
+ORDER BY score DESC
