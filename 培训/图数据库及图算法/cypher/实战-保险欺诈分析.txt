@@ -1,0 +1,192 @@
+// #####################################################
+// 
+// 保险欺诈检测案例分析
+//
+// v1.0 by Fanghua Yu
+
+// ----------------------------------------
+// 1 - 图特征分析
+
+// 显示元数据
+
+CALL apoc.meta.graph
+
+// 投保人-投保次数分布
+
+MATCH (u:自然人)
+WITH size ((:索赔) -- (u)) AS countOfClaims
+WITH countOfClaims, count(countOfClaims) AS cnt
+RETURN countOfClaims, cnt
+ORDER BY countOfClaims ASC
+
+// -----------------------------------------
+// 2 - 合成身份检测
+
+// 发现`保险人`所有的相关节点
+
+MATCH (n:保险人)
+WITH n LIMIT 3
+MATCH path = (n)-[]->()
+RETURN path
+
+// 发现合成身份
+MATCH (n1:保险人)-[]->(contactInformation) 
+WITH  contactInformation, count(n1) AS RingSize,
+      collect(id(n1)) AS _FraudRing
+WHERE RingSize > 1 
+MATCH (contactInformation)<-[]-(n2:保险人),
+      (n2)-[r:HAS_寿险|HAS_财产险|HAS_车辆险]->(insurance) 
+WITH  collect(id(n2)) AS AccountHolders ,
+      contactInformation , RingSize , _FraudRing ,
+      TOFLOAT(SUM(CASE type(r) 
+                  WHEN 'HAS_寿险' THEN insurance.保额 
+                  WHEN 'HAS_财产险' THEN insurance.保额
+				  ELSE 0 END)) as FinancialRisk
+RETURN  _FraudRing, RingSize , FinancialRisk , collect(labels(contactInformation)) as ContactType
+
+// 查看潜在合成身份欺诈的关系图谱
+MATCH (n1:保险人)
+WHERE id(n1) IN [5000,5116]
+WITH n1
+MATCH path = (n1) -[]- (contactInformation) 
+RETURN path
+
+// -----------------------------------------
+// 3 - 索赔相关分析
+
+// 查询索赔的关系图谱
+MATCH (n:索赔)
+WITH n LIMIT 3
+MATCH path = (n)-[]->()
+RETURN path
+ 
+// 创建人员之间新的关系LINKS
+MATCH (n1:索赔)-[r:HAS_车主]-> (o)
+MATCH (n1) -[:HAS_目击者]-> (w)
+MATCH (n1) -[:HAS_乘客]->(p) 
+WITH n1,o,w,p 
+MERGE (o) -[r1:LINKS{type:'目击者'}]-> (w)
+  ON CREATE SET r1.times = 1
+  ON MATCH SET r1.times = r1.times + 1
+MERGE (o) -[r2:LINKS{type: '乘客'}]-> (p)
+  ON CREATE SET r2.times = 1
+  ON MATCH SET r2.times = r2.times + 1
+RETURN *
+
+// 指定通用标签“自然人”
+MATCH (n:乘客) SET n:自然人
+MATCH (n:车主) SET n:自然人
+MATCH (n:目击者) SET n:自然人
+
+// 计算基于新关系的联通性
+CALL algo.unionFind.queue('自然人','LINKS')
+
+// 在分区partition属性上创建索引
+CREATE INDEX ON :自然人(partition)
+
+// 查看社区规模
+MATCH (n:自然人)
+RETURN n.partition, count(n) AS size
+ORDER BY size DESC LIMIT 10
+
+// 社团划分 - 标签传播
+CALL algo.labelPropagation(
+  'MATCH (n:自然人{partition:68}) RETURN id(n) AS id, 1 as weight, id(n) as value',
+  'MATCH (n1:自然人{partition:68}) -[f:LINKS]-> (n2:自然人) RETURN id(n1) as source, id(n2) as target, 1 as weight',
+  { graph:'cypher',write:true,writeProperty:'lpPartition',iterations:20, diretion:'both'  }
+);
+
+// 查看社区规模
+MATCH (n:自然人)
+WHERE exists(n.lpPartition)
+RETURN n.lpPartition, count(n) AS size
+ORDER BY size DESC LIMIT 10
+
+// 使用Lovain算法检测社团
+
+CALL algo.louvain(
+  'MATCH (n:自然人{partition:68}) RETURN id(n) AS id',
+  'MATCH (n1:自然人{partition:68}) -[f:LINKS]-> (n2:自然人) RETURN id(n1) as source, id(n2) as target, 1 as weight',
+  {graph:'cypher',write:true,writeProperty:'lvPartition', diretion:'both'}
+);
+
+// 查看社区规模
+MATCH (n:自然人)
+WHERE exists(n.lvPartition)
+RETURN n.lvPartition, count(n) AS size
+ORDER BY size DESC LIMIT 10
+
+// 对Lovain算法划分的结果的前5名社团上色
+
+MATCH (n:自然人{partition:68}) 
+WHERE n.lvPartition IN [2,9,0,10,8] 
+WITH id(n) AS nodeId, n.lvPartition AS partition
+CALL apoc.cypher.doIt('MATCH (n) WHERE id(n) =  ' + nodeId + ' SET n:LvGroup_' + partition, NULL) 
+YIELD value
+RETURN value
+
+// 查看上色结果
+
+MATCH (n:自然人{partition:68}) -[r:LINKS]-> (q:自然人) 
+RETURN *
+
+// ------------------------------------------------------------
+// 4 - 人物重要性分析
+
+// 使用度中心性过程计算节点的重要性
+
+CALL algo.degree.stream('自然人', 'LINKS', {direction: 'BOTH', weightProperty: 'times'})
+YIELD nodeId, score
+RETURN algo.asNode(nodeId).姓名 AS node, score AS centrality
+ORDER BY centrality DESC
+LIMIT 20;
+
+// 使用紧密中心性过程计算节点的重要性
+CALL algo.closeness.stream(
+  'MATCH (n:自然人{partition:68}) RETURN id(n) AS id',
+  'MATCH (n1:自然人{partition:68}) -[f:LINKS]- (n2:自然人) RETURN id(n1) as source, id(n2) as target, 1 as weight',
+  { graph:'cypher',write:true,writeProperty:'lvPartition’,diretion:'both'  }
+) YIELD nodeId, centrality
+RETURN algo.asNode(nodeId).姓名 AS node, centrality
+ORDER BY centrality DESC
+LIMIT 20;
+
+// 使用间接中心性过程计算节点的重要性
+CALL algo.betweenness.stream(
+  'MATCH (n:自然人{partition:68}) RETURN id(n) AS id',
+  'MATCH (n1:自然人{partition:68}) -[f:LINKS]- (n2:自然人) RETURN id(n1) as source, id(n2) as target, 1 as weight',
+  {graph:'cypher',write:true,writeProperty:'lvPartition', diretion:'both'}
+) YIELD nodeId, centrality
+RETURN algo.asNode(nodeId).姓名 AS node, centrality
+ORDER BY centrality DESC
+LIMIT 20;
+
+// 使用页面排行过程计算节点的重要性
+CALL algo.pageRank.stream(
+  'MATCH (n:自然人{partition:68}) RETURN id(n) AS id',
+  'MATCH (n1:自然人{partition:68}) -[f:LINKS]- (n2:自然人) RETURN id(n1) as source, id(n2) as target, 1 as weight',
+  { graph:'cypher',write:true,writeProperty:'lvPartition’, diretion:'both' }
+) YIELD nodeId, score
+RETURN algo.asNode(nodeId).姓名 AS node, score
+ORDER BY score DESC
+LIMIT 20;
+
+// ------------------------------------------------------------
+// 5 - 人物相似度分析
+
+// 使用重叠相似度过程计算相似节点
+
+MATCH (p1:自然人 {姓名: '冯小芳'}) -[:LINKS]- (p01)
+WITH p1, collect(id(p01)) AS p1s, count(p01) AS count
+WHERE count > 5
+MATCH (p2:自然人) -[:LINKS]- (p02) WHERE p1 <> p2
+WITH p1, p1s, p2, collect(id(p02)) AS p2s
+RETURN p1.姓名 AS from,
+       p2.姓名 AS to,
+       p1s,p2s,
+       algo.similarity.overlap(p1s, p2s) AS similarity
+ORDER BY similarity DESC LIMIT 10
+
+
+
+
