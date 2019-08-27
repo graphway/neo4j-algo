@@ -1,0 +1,159 @@
+//Spark图数据分析：社区发现算法(Community Detection)
+
+//1.初始化
+from .import_graph import create_software_graph
+__all__ = ['create_software_graph']
+
+
+//2.导入图文件
+# // tag::imports[]
+from graphframes import *
+# // end::imports[]
+
+# // tag::load-graph-frame[]
+def create_software_graph():
+    nodes = spark.read.csv("data/sw-nodes.csv", header=True)
+    relationships = spark.read.csv("data/sw-relationships.csv", header=True)
+    return GraphFrame(nodes, relationships)
+# // end::load-graph-frame[]
+
+
+//3.社区分割
+import networkx as nx
+import community
+
+G = nx.Graph()
+
+G.add_nodes_from([
+    "six",
+    "pandas",
+    "numpy",
+    "python-dateutil",
+    "pytz",
+    "pyspark",
+    "matplotlib",
+    "spacy",
+    "py4j",
+    "jupyter",
+    "jpy-console",
+    "nbconvert",
+    "ipykernel",
+    "jpy-client",
+    "jpy-core"
+])
+
+G.add_edges_from([
+    ("pandas", "numpy"),
+    ("pandas", "pytz"),
+    ("pandas", "python-dateutil"),
+    ("python-dateutil", "six"),
+    ("pyspark", "py4j"),
+    ("matplotlib", "numpy"),
+    ("matplotlib", "python-dateutil"),
+    ("matplotlib", "six"),
+    ("matplotlib", "pytz"),
+    ("spacy", "six"),
+    ("spacy", "numpy"),
+    ("jupyter", "nbconvert"),
+    ("jupyter", "ipykernel"),
+    ("jupyter", "jpy-console"),
+    ("jpy-console", "jpy-client"),
+    ("jpy-console", "ipykernel"),
+    ("jpy-client", "jpy-core"),
+    ("nbconvert", "jpy-core"),
+])
+
+d = community.generate_dendrogram(G)
+
+l0 = community.partition_at_level(d, 0)
+print(l0)
+print("l0 modularity: " + str(community.modularity(l0, G)))
+
+l1 = community.partition_at_level(d, 1)
+print(l1)
+print("l1 modularity: " + str(community.modularity(l1, G)))
+
+
+//4.标签传播算法 Label Propagation Algorithm
+
+# // tag::imports[]
+from pyspark.sql import functions as F
+# // end::imports[]
+
+from scripts.community_detection.import_graph import  create_software_graph
+
+# // tag::load-graph-frame[]
+g = create_software_graph()
+# // end::load-graph-frame[]
+
+# // tag::lpa[]
+result = g.labelPropagation(maxIter=10)
+result.sort("label").groupby("label").agg(F.collect_list("id")).show(truncate=False)
+# // end::lpa[]
+
+
+//5.强连通组件 Strong Connected Component
+# // tag::imports[]
+from graphframes import *
+from pyspark.sql import functions as F
+# // end::imports[]
+
+# // tag::load-graph-frame[]
+v = spark.read.csv("data/sw-nodes.csv", header=True)
+e = spark.read.csv("data/sw-relationships.csv", header=True)
+g = GraphFrame(v, e)
+# // end::load-graph-frame[]
+
+# // tag::scc[]
+result = g.stronglyConnectedComponents(maxIter=10)
+result.sort("component") \
+    .groupby("component") \
+    .agg(F.collect_list("id").alias("libraries")) \
+    .show(truncate=False)
+# // end::scc[]
+
+
+//5.数三角形数量 Triangle Count
+# // tag::imports[]
+from graphframes import *
+
+# // end::imports[]
+
+# // tag::load-graph-frame[]
+v = spark.read.csv("data/sw-nodes.csv", header=True)
+e = spark.read.csv("data/sw-relationships.csv", header=True)
+g = GraphFrame(v, e)
+# // end::load-graph-frame[]
+
+# // tag::triangles[]
+result = g.triangleCount()
+result.sort("count", ascending=False) \
+    .filter('count > 0') \
+    .show()
+#  // end::triangles[]
+
+
+//6.连通组件　Connected Component
+# // tag::imports[]
+from pyspark.sql import functions as F
+# // end::imports[]
+
+from scripts.community_detection.import_graph import  create_software_graph
+
+# // tag::load-graph-frame[]
+g = create_software_graph()
+# // end::load-graph-frame[]
+
+sc.setCheckpointDir("/tmp")
+
+# // tag::unionfind[]
+result = g.connectedComponents()
+result.sort("component") \
+    .groupby("component") \
+    .agg(F.collect_list("id").alias("libraries")) \
+    .show(truncate=False)
+#  // end::unionfind[]
+
+
+
+

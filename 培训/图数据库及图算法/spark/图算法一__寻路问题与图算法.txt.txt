@@ -130,3 +130,170 @@ def shortest_path(g, origin, destination, column_name="cost"):
 # // end::custom-shortest-path[]
 
 
+
+//6.计算两个节点对之间的最短距离 allshortestpaths
+# // tag::imports[]
+from graphframes import *
+# // end::imports[]
+
+# // tag::load-graph-frame[]
+v = spark.read.csv("data/transport-nodes.csv", header=True)
+e = spark.read.csv("data/transport-relationships.csv", header=True)
+g = GraphFrame(v, e)
+# // end::load-graph-frame[]
+
+# // tag::allshortestpaths[]
+result = g.shortestPaths(["Colchester", "Immingham", "Hoek van Holland"])
+result.sort(["id"]).select("id", "distances").show(truncate=False)
+# // end::allshortestpaths[]
+
+
+//7.单源点最短路径single source shortest path
+from .custom_sssp import sssp
+
+__all__ = ['sssp']
+
+# // tag::imports[]
+from pyspark.sql.types import *
+from graphframes import *
+from pyspark.sql import functions as F
+import pandas as pd
+# // end::imports[]
+
+from scripts.path_finding.sssp.custom_sssp import sssp
+from scripts.path_finding.import_graph import create_transport_graph
+
+# // tag::load-graph-frame[]
+g = create_transport_graph()
+# // end::load-graph-frame[]
+
+# // tag::via[]
+via_udf = F.udf(lambda path: path[1:-1], ArrayType(StringType()))
+# // end::via[]
+
+# // tag::execute[]
+result = sssp(g, "Amsterdam", "cost")
+(result
+ .withColumn("via", via_udf("path"))
+ .select("id", "distance", "via")
+ .sort("distance")
+ .show(truncate=False))
+# // end::execute[]
+
+
+//8.自定义单源点最短路径custom_single source shortest path
+from pyspark.sql.types import *
+from graphframes import *
+
+# // tag::imports[]
+from scripts.aggregate_messages import AggregateMessages as AM
+from pyspark.sql import functions as F
+# // end::imports[]
+
+
+# // tag::udfs[]
+add_path_udf = F.udf(lambda path, id: path + [id], ArrayType(StringType()))
+# // end::udfs[]
+
+
+# // tag::sssp[]
+def sssp(g, origin, column_name="cost"):
+    vertices = g.vertices \
+        .withColumn("visited", F.lit(False)) \
+        .withColumn("distance",
+            F.when(g.vertices["id"] == origin, 0).otherwise(float("inf"))) \
+        .withColumn("path", F.array())
+    cached_vertices = AM.getCachedDataFrame(vertices)
+    g2 = GraphFrame(cached_vertices, g.edges)
+
+    while g2.vertices.filter('visited == False').first():
+        current_node_id = g2.vertices.filter('visited == False').sort("distance").first().id
+
+        msg_distance = AM.edge[column_name] + AM.src['distance']
+        msg_path = add_path_udf(AM.src["path"], AM.src["id"])
+        msg_for_dst = F.when(AM.src['id'] == current_node_id, F.struct(msg_distance, msg_path))
+        new_distances = g2.aggregateMessages(
+            F.min(AM.msg).alias("aggMess"), sendToDst=msg_for_dst)
+
+        new_visited_col = F.when(
+            g2.vertices.visited | (g2.vertices.id == current_node_id), True).otherwise(False)
+        new_distance_col = F.when(new_distances["aggMess"].isNotNull() &
+                                  (new_distances.aggMess["col1"] < g2.vertices.distance),
+                                  new_distances.aggMess["col1"]) \
+                            .otherwise(g2.vertices.distance)
+        new_path_col = F.when(new_distances["aggMess"].isNotNull() &
+                              (new_distances.aggMess["col1"] < g2.vertices.distance),
+                              new_distances.aggMess["col2"].cast("array<string>")) \
+                        .otherwise(g2.vertices.path)
+
+        new_vertices = g2.vertices.join(new_distances, on="id", how="left_outer") \
+            .drop(new_distances["id"]) \
+            .withColumn("visited", new_visited_col) \
+            .withColumn("newDistance", new_distance_col) \
+            .withColumn("newPath", new_path_col) \
+            .drop("aggMess", "distance", "path") \
+            .withColumnRenamed('newDistance', 'distance') \
+            .withColumnRenamed('newPath', 'path')
+        cached_new_vertices = AM.getCachedDataFrame(new_vertices)
+        g2 = GraphFrame(cached_new_vertices, g2.edges)
+
+    return g2.vertices \
+                .withColumn("newPath", add_path_udf("path", "id")) \
+                .drop("visited", "path") \
+                .withColumnRenamed("newPath", "path")
+# // end::sssp[]
+
+
+//9.广度优先搜索
+# // tag::imports[]
+from graphframes import *
+from pyspark.sql.types import *
+import pandas as pd
+
+# // end::imports[]
+
+# // tag::load-graph-frame[]
+fields = [
+    StructField("id", StringType(), True),
+    StructField("latitude", FloatType(), True),
+    StructField("longitude", FloatType(), True),
+    StructField("population", IntegerType(), True)
+]
+v = spark.read.csv("data/transport-nodes.csv", header=True, schema=StructType(fields))
+
+src_dst = spark.read.csv("data/transport-relationships.csv", header=True)
+df_src_dst = src_dst.toPandas()
+df_dst_src = src_dst.toPandas()
+df_dst_src.columns = ["dst", "src", "relationship", "cost"]
+
+e = spark.createDataFrame(pd.concat([df_src_dst, df_dst_src]))
+
+g = GraphFrame(v, e)
+# // end::load-graph-frame[]
+
+# // tag::candidates[]
+g.vertices \
+    .filter("population > 100000 and population < 300000") \
+    .sort("population") \
+    .show()
+# // end::candidates[]
+
+
+# // tag::shortestpath[]
+from_expr = "id='Den Haag'"
+to_expr = "population > 100000 and population < 300000 and id <> 'Den Haag'"
+result = g.bfs(from_expr, to_expr)
+# // end::shortestpath[]
+
+# // tag::shortestpath-columns[]
+print(result.columns)
+# // end::shortestpath-columns[]
+
+
+#  // tag::shortestpath-results[]
+columns = [column for column in result.columns if not column.startswith("e")]
+result.select(columns).show()
+#  // end::shortestpath-results[]
+
+
+
