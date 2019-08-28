@@ -94,7 +94,7 @@ ASSERT exists(r.relationship);
 
 // 使用MERGE
 MERGE  (n1:`人物` {name: '刘备'})
-MERGE  (n2:`人物` {name: '刘禅'}),
+MERGE  (n2:`人物` {name: '刘禅'})
 MERGE  (n1) -[:`关系`{relationship:'父亲'}]-> (n2)
 
 // 运行过程
