@@ -78,7 +78,7 @@ WITH p1,p2
 MATCH (n1), (n2)
 WHERE id(n1) = p1 AND id(n2) = p2
 OPTIONAL MATCH (n1) -[l:LINKS]- (n2) 
-WITH n1,n2, sum(CASE WHEN n1 = n2 THEN 0 WHEN l IS NULL THEN 0 ELSE 1 END) AS f
+WITH n1,n2, sum(CASE WHEN n1 = n2 THEN 1 WHEN l IS NULL THEN 0 ELSE 1 END) AS f
 // iv. 保存向量到节点的embedding属性
 WITH n1, collect(f) AS embedding
     SET n1.embedding = embedding
